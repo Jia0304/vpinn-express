@@ -1,0 +1,38 @@
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# === 大体积数据文件（不进仓库）===
+*.npz
+*.rpt
+*.inp
+*.stp
+*.step
+*.png
+
+# === 开发/测试临时文件 ===
+test_*.py
+diagnose.py
+start.bat
+start.py
+start_simple.py
+
+# === 旧文档（仓库只保留 README）===
+ERROR_SOLUTION.md
+FEATURES.md
+QUICK_REFERENCE.md
+RUN_INSTRUCTIONS.md
+STP_UPLOAD_GUIDE.md
+SUMMARY.md
+TROUBLESHOOTING.md
+VERSION_COMPARISON.md
+
+# === IDE / OS ===
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store

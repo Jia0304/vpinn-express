@@ -1,0 +1,21 @@
+# ============================================================
+# VPINN Express — 依赖清单
+# ============================================================
+# 关键点：Streamlit Community Cloud 只有 ~1GB 内存，
+# 必须使用 CPU-only 版 PyTorch，否则会因 CUDA 库体积导致 OOM。
+# --extra-index-url 指向 PyTorch 官方 CPU-only 轮子仓库。
+# ============================================================
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# ── 核心框架 ──
+streamlit>=1.32.0
+torch>=2.1.0,<2.5.0          # CPU-only (由上方 index 保证)
+
+# ── 科学计算 ──
+numpy>=1.24.0,<2.0.0
+scipy>=1.10.0
+pandas>=2.0.0
+
+# ── 可视化 ──
+plotly>=5.18.0
