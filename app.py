@@ -19,6 +19,7 @@ import time
 from vpinn_core.config import SimulationConfig
 from vpinn_core.solver import run_solver
 from vpinn_core.geometry import generate_plate_with_hole
+from vpinn_core.geometry_stp import sample_from_step_file
 
 # ====================================================================
 # 页面全局配置
@@ -30,15 +31,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── 自定义 CSS：收窄顶部留白、美化按钮 ─────────────────────────────
 st.markdown(
     """
 <style>
-    /* 缩小顶部空白 */
     .block-container { padding-top: 1.5rem; }
-    /* 主标题样式 */
     h1 { letter-spacing: 0.02em; }
-    /* 隐藏 Streamlit 默认 footer */
     footer { visibility: hidden; }
 </style>
 """,
@@ -46,12 +43,16 @@ st.markdown(
 )
 
 # ====================================================================
-# 初始化 Session State（仅首次运行时执行）
+# 初始化 Session State
 # ====================================================================
 if "result" not in st.session_state:
-    st.session_state.result = None  # 求解结果缓存
+    st.session_state.result = None
 if "run_params" not in st.session_state:
-    st.session_state.run_params = None  # 上次运行的参数快照
+    st.session_state.run_params = None
+if "geom_data" not in st.session_state:
+    st.session_state.geom_data = None  # STP/NPZ 预处理后的点云
+if "geom_bounds" not in st.session_state:
+    st.session_state.geom_bounds = None  # STP 解析出的几何边界信息
 
 # ====================================================================
 # 侧边栏 — 控制面板
@@ -62,24 +63,122 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ── 1. 几何参数 ────────────────────────────────────────────────
-    st.subheader("1. 几何参数")
-    r_hole = st.slider(
-        "开孔半径 r (mm)",
-        min_value=2.0,
-        max_value=20.0,
-        value=10.0,
-        step=0.5,
-        help="圆孔板中心孔的半径，板尺寸固定为 50×100 mm",
+    # ── 0. 几何输入方式 ────────────────────────────────────────────
+    st.subheader("0. 几何输入方式")
+    geom_mode = st.radio(
+        "选择输入方式",
+        ["⚙️ 参数化生成（圆孔板）", "📁 上传文件（STP / NPZ）"],
+        index=0,
+        help="参数化模式可拖动滑块调整孔径；上传模式支持 STEP 和 NPZ 文件",
     )
-    n_points = st.slider(
-        "采样点数",
-        min_value=500,
-        max_value=5000,
-        value=2000,
-        step=250,
-        help="域内 Monte-Carlo 积分点数量，越多精度越高但越慢",
-    )
+
+    st.markdown("---")
+
+    # ── 1. 几何参数（根据模式切换） ────────────────────────────────
+    st.subheader("1. 几何设置")
+
+    if geom_mode == "⚙️ 参数化生成（圆孔板）":
+        # ---- 参数化模式 ----
+        r_hole = st.slider(
+            "开孔半径 r (mm)",
+            min_value=2.0,
+            max_value=20.0,
+            value=10.0,
+            step=0.5,
+            help="圆孔板中心孔的半径，板尺寸固定为 50×100 mm",
+        )
+        n_points = st.slider(
+            "采样点数",
+            min_value=500,
+            max_value=5000,
+            value=2000,
+            step=250,
+            help="域内 Monte-Carlo 积分点数量",
+        )
+        # 清空上传数据
+        st.session_state.geom_data = None
+        st.session_state.geom_bounds = None
+
+    else:
+        # ---- 上传模式 ----
+        uploaded_file = st.file_uploader(
+            "上传几何文件",
+            type=["stp", "step", "npz"],
+            help="支持 STEP (.stp/.step) 和采样点 (.npz) 格式",
+        )
+
+        n_points = st.slider(
+            "采样点数（STP 模式生效）",
+            min_value=500,
+            max_value=5000,
+            value=2000,
+            step=250,
+        )
+
+        # 预处理按钮
+        if st.button("🔍 预处理几何", use_container_width=True):
+            if uploaded_file is None:
+                st.warning("请先上传文件")
+            else:
+                fname = uploaded_file.name.lower()
+                with st.spinner("正在解析文件..."):
+                    try:
+                        raw_bytes = uploaded_file.read()
+                        uploaded_file.seek(0)  # 重置指针
+
+                        if fname.endswith((".stp", ".step")):
+                            # ── STP 解析 ──
+                            geom_result = sample_from_step_file(
+                                raw_bytes,
+                                n_points=n_points,
+                            )
+                            st.session_state.geom_data = {
+                                "xy": geom_result["xy"],
+                                "w": geom_result["w"],
+                            }
+                            st.session_state.geom_bounds = geom_result["bounds"]
+
+                        elif fname.endswith(".npz"):
+                            # ── NPZ 直接加载 ──
+                            data = np.load(uploaded_file)
+                            st.session_state.geom_data = {
+                                "xy": data["xy"],
+                                "w": data["w"],
+                            }
+                            # 从点云推断边界
+                            xy = data["xy"]
+                            st.session_state.geom_bounds = {
+                                "x_min": float(xy[:, 0].min()),
+                                "x_max": float(xy[:, 0].max()),
+                                "y_min": float(xy[:, 1].min()),
+                                "y_max": float(xy[:, 1].max()),
+                                "hole_radius": 10.0,  # NPZ 无法自动检测
+                            }
+
+                        n_loaded = len(st.session_state.geom_data["xy"])
+                        st.success(f"✅ 采样完成！{n_loaded} 个点")
+
+                    except Exception as e:
+                        st.error(f"文件处理失败: {e}")
+                        st.session_state.geom_data = None
+                        st.session_state.geom_bounds = None
+
+        # 显示已解析的几何信息
+        if st.session_state.geom_bounds is not None:
+            b = st.session_state.geom_bounds
+            st.markdown("**几何信息**")
+            st.text(
+                f"X: [{b['x_min']:.1f}, {b['x_max']:.1f}]\n"
+                f"Y: [{b['y_min']:.1f}, {b['y_max']:.1f}]\n"
+                f"孔径: {b['hole_radius']:.1f} mm"
+            )
+
+        # 上传模式下 r_hole 从解析结果取
+        r_hole = (
+            st.session_state.geom_bounds["hole_radius"]
+            if st.session_state.geom_bounds
+            else 10.0
+        )
 
     # ── 2. 载荷参数 ────────────────────────────────────────────────
     st.subheader("2. 载荷条件")
@@ -106,11 +205,24 @@ with st.sidebar:
     st.markdown("---")
 
     # ── 启动按钮 ───────────────────────────────────────────────────
-    run_btn = st.button("🚀 启动仿真", type="primary", use_container_width=True)
+    # 上传模式下，未预处理时禁用按钮
+    if geom_mode == "📁 上传文件（STP / NPZ）" and st.session_state.geom_data is None:
+        st.warning("请先上传文件并点击「预处理几何」")
+        run_btn = st.button(
+            "🚀 启动仿真",
+            type="primary",
+            use_container_width=True,
+            disabled=True,
+        )
+    else:
+        run_btn = st.button(
+            "🚀 启动仿真",
+            type="primary",
+            use_container_width=True,
+        )
 
-    # ── 侧边栏底部信息 ─────────────────────────────────────────────
     st.markdown("---")
-    st.caption("VPINN Express v0.1 · Mesh-Free · Differentiable")
+    st.caption("VPINN Express v0.2 · Mesh-Free · Differentiable")
 
 # ====================================================================
 # 标题区
@@ -121,28 +233,34 @@ st.markdown(
 )
 
 # ====================================================================
-# 主计算流程（仅在点击按钮时触发）
+# 主计算流程
 # ====================================================================
 if run_btn:
-    # 用 st.status 展示多阶段 Agent 工作流
     with st.status("🤖 Agent 工作流启动中...", expanded=True) as status:
-        # ── 阶段 1: Geo-Agent 生成几何 ────────────────────────────
-        st.write("**🔷 Geo-Agent:** 正在生成无网格采样点...")
-        t0 = time.time()
-        geom_data = generate_plate_with_hole(
-            n_points=n_points,
-            r_hole=r_hole,
-        )
-        t_geo = time.time() - t0
-        st.write(f"　✅ 生成 {len(geom_data['xy'])} 个积分点　({t_geo:.2f}s)")
+        # ── 阶段 1: Geo-Agent ─────────────────────────────────────
+        if geom_mode == "⚙️ 参数化生成（圆孔板）":
+            st.write("**🔷 Geo-Agent:** 正在生成无网格采样点...")
+            t0 = time.time()
+            geom_data = generate_plate_with_hole(
+                n_points=n_points,
+                r_hole=r_hole,
+            )
+            t_geo = time.time() - t0
+            st.write(f"　✅ 生成 {len(geom_data['xy'])} 个积分点　({t_geo:.2f}s)")
+        else:
+            st.write("**🔷 Geo-Agent:** 正在加载已预处理的采样点...")
+            t0 = time.time()
+            geom_data = st.session_state.geom_data
+            t_geo = time.time() - t0
+            st.write(f"　✅ 加载 {len(geom_data['xy'])} 个积分点　({t_geo:.2f}s)")
 
-        # ── 阶段 2: Trainer-Agent 训练网络 ─────────────────────────
+        # ── 阶段 2: Trainer-Agent ─────────────────────────────────
         st.write("**🔷 Trainer-Agent:** 正在初始化神经网络 (MLP 5×64)...")
         cfg = SimulationConfig(
             sigma0=sigma0,
             epochs=epochs,
             domain_data_numpy=geom_data,
-            device="cpu",  # 云端部署强制 CPU
+            device="cpu",
         )
 
         st.write(f"**🔷 Trainer-Agent:** Adam ×{epochs} → LBFGS 精修中...")
@@ -151,19 +269,17 @@ if run_btn:
         t_solve = time.time() - t1
         st.write(f"　✅ 训练完成　({t_solve:.1f}s)")
 
-        # ── 阶段 3: Analyst-Agent 后处理 ──────────────────────────
+        # ── 阶段 3: Analyst-Agent ─────────────────────────────────
         st.write("**🔷 Analyst-Agent:** 正在渲染应力场与生成报告...")
-        time.sleep(0.2)  # 模拟后处理延迟
+        time.sleep(0.2)
         st.write("　✅ 后处理完成")
 
-        # 更新状态栏
         status.update(
             label=f"✅ 仿真完成！总耗时 {t_geo + t_solve:.1f}s",
             state="complete",
             expanded=False,
         )
 
-    # ── 缓存结果到 session_state ──────────────────────────────────
     st.session_state.result = result
     st.session_state.run_params = {
         "r_hole": r_hole,
@@ -173,12 +289,11 @@ if run_btn:
     }
 
 # ====================================================================
-# 结果展示区（从 session_state 读取，rerun 不会丢失）
+# 结果展示区
 # ====================================================================
 res = st.session_state.result
 
 if res is not None:
-    # ── 准备 DataFrame ─────────────────────────────────────────────
     df = pd.DataFrame(
         {
             "x": res["data"]["x"],
@@ -188,17 +303,13 @@ if res is not None:
         }
     )
 
-    # 取回上次运行参数（用于理论值计算和圆孔绘制）
     params = st.session_state.run_params or {}
     cur_r = params.get("r_hole", r_hole)
     cur_sigma = params.get("sigma0", sigma0)
 
-    # ── 布局：左列 (云图) ｜ 右列 (KPI + Loss + 位移) ──────────────
     col_left, col_right = st.columns([3, 2], gap="large")
 
-    # ================================================================
-    # 左列：Von Mises 应力云图
-    # ================================================================
+    # ── 左列：应力云图 ─────────────────────────────────────────────
     with col_left:
         st.subheader("📊 Von Mises 应力云图")
 
@@ -213,8 +324,7 @@ if res is not None:
                     colorscale="Jet",
                     showscale=True,
                     colorbar=dict(
-                        title=dict(text="σ_vm (MPa)", side="right"),
-                        thickness=15,
+                        title=dict(text="σ_vm (MPa)", side="right"), thickness=15
                     ),
                     cmin=float(df["von_mises"].quantile(0.01)),
                     cmax=float(df["von_mises"].quantile(0.99)),
@@ -227,7 +337,6 @@ if res is not None:
             )
         )
 
-        # 绘制圆孔轮廓
         theta = np.linspace(0, 2 * np.pi, 120)
         fig_stress.add_trace(
             go.Scatter(
@@ -240,7 +349,6 @@ if res is not None:
             )
         )
 
-        # 保持物理比例
         x_pad = 5
         fig_stress.update_layout(
             height=700,
@@ -253,15 +361,12 @@ if res is not None:
                 constrain="domain",
             ),
             yaxis=dict(
-                title="Y (mm)",
-                range=[df["y"].min() - x_pad, df["y"].max() + x_pad],
+                title="Y (mm)", range=[df["y"].min() - x_pad, df["y"].max() + x_pad]
             ),
             template="plotly_white",
         )
-
         st.plotly_chart(fig_stress, use_container_width=True)
 
-        # 数据下载
         csv_data = df.to_csv(index=False)
         st.download_button(
             "📥 下载结果 CSV",
@@ -270,14 +375,11 @@ if res is not None:
             mime="text/csv",
         )
 
-    # ================================================================
-    # 右列：KPI + Loss + 位移场
-    # ================================================================
+    # ── 右列：KPI + Loss + 位移 ───────────────────────────────────
     with col_right:
         st.subheader("📈 Agent 监控面板")
 
-        # ── KPI 指标卡 ────────────────────────────────────────────
-        theoretical = cur_sigma * 3.0  # Kirsch 解析解 Kt=3
+        theoretical = cur_sigma * 3.0
         max_stress = res["max_stress"]
         rel_error = (max_stress - theoretical) / theoretical * 100
 
@@ -288,10 +390,8 @@ if res is not None:
 
         st.markdown("---")
 
-        # ── Loss 收敛曲线 ─────────────────────────────────────────
         st.markdown("**Loss 收敛曲线 (能量泛函)**")
         loss_arr = np.array(res["loss_history"])
-
         fig_loss = go.Figure(
             data=go.Scatter(
                 y=loss_arr,
@@ -311,9 +411,7 @@ if res is not None:
 
         st.markdown("---")
 
-        # ── 位移场云图 ────────────────────────────────────────────
         st.markdown("**位移幅值 (Displacement Magnitude)**")
-
         fig_disp = go.Figure(
             data=go.Scatter(
                 x=df["x"],
@@ -325,8 +423,7 @@ if res is not None:
                     colorscale="Viridis",
                     showscale=True,
                     colorbar=dict(
-                        title=dict(text="u (mm)", side="right"),
-                        thickness=12,
+                        title=dict(text="u (mm)", side="right"), thickness=12
                     ),
                 ),
                 text=[
@@ -345,7 +442,6 @@ if res is not None:
         )
         st.plotly_chart(fig_disp, use_container_width=True)
 
-        # ── 折叠统计面板 ─────────────────────────────────────────
         with st.expander("📋 详细统计"):
             st.markdown(f"""
 | 指标 | 值 |
@@ -359,7 +455,7 @@ if res is not None:
 """)
 
 # ====================================================================
-# 占位符（尚未运行时的引导界面）
+# 占位引导界面
 # ====================================================================
 else:
     st.info("👈 请在左侧设置参数，然后点击 **启动仿真** 开始计算。")
@@ -368,10 +464,14 @@ else:
     with col_a:
         st.markdown("""
 ### 📝 使用说明
-1. **调整孔径** — 拖动滑块设置圆孔半径 r
-2. **设置载荷** — 输入顶部拉应力 σ₀
-3. **启动仿真** — 点击按钮，Agent 自动完成几何→训练→后处理
-4. **查看结果** — 左侧应力云图，右侧 KPI 与 Loss 曲线
+**模式 A — 参数化生成**
+1. 选择「参数化生成」，拖动滑块设置孔径
+2. 设置载荷 → 启动仿真
+
+**模式 B — 上传文件**
+1. 选择「上传文件」，上传 `.stp` 或 `.npz`
+2. 点击「预处理几何」解析采样点
+3. 设置载荷 → 启动仿真
 """)
     with col_b:
         st.markdown("""
@@ -381,4 +481,10 @@ else:
 - **自动微分**: PyTorch autograd 计算应变/应力张量
 - **硬约束**: 底部位移 Dirichlet BC 直接编码进网络
 - **双阶段优化**: Adam 全局搜索 + LBFGS 局部精修
+
+### 📂 支持的文件格式
+| 格式 | 说明 |
+|---|---|
+| `.stp` / `.step` | STEP AP214/AP203，自动解析边界与圆孔 |
+| `.npz` | NumPy 压缩包，需含 `xy` 和 `w` 数组 |
 """)
